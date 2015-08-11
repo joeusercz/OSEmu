@@ -8,6 +8,7 @@ static struct aes_keys cl_aes_keys;
 static uchar cl_ucrc[4];
 static unsigned char cl_user[128];
 static unsigned char cl_passwd[128];
+struct sockaddr_in stream_server_ip;
 
 static int cl_sockfd;
 static struct sockaddr_in cl_socket;
@@ -355,7 +356,7 @@ static void camd35_process_emm(uchar *buf, int buflen)
 }
 
 void show_usage(char *cmdline) {
-	cs_log("Usage: %s -a <user>:<password> -p <port> [-b -v -e -c <path> -l <logfile> -i -L -r <stream source port>:<osemu stream rely port>]", cmdline);
+	cs_log("Usage: %s -a <user>:<password> -p <port> [-b -v -e -c <path> -l <logfile> -i -L -r <stream source ip address>:<stream source port>:<osemu stream relay port>]", cmdline);
 	cs_log("-b enables to start as a daemon (background)");
 	cs_log("-v enables a more verbose output (debug output)");
 	cs_log("-e enables emm au");
@@ -363,7 +364,7 @@ void show_usage(char *cmdline) {
 	cs_log("-l sets log file");
 	cs_log("-L only allow local connections");
 	cs_log("-i show version info and exit");
-	cs_log("-r <stream source port>:<relay port> enables stream relay server");
+	cs_log("-r <stream source ip address>:<stream source port>:<relay port> enables stream relay server");
 }
 
 #define SAFE_PTHREAD_1ARG(a, b, c) { \
@@ -501,6 +502,8 @@ int main(int argc, char**argv)
 			break;
 		case 'r': {
 			char *ptr = strtok(optarg, ":");
+			cs_strncpy((char *)emu_stream_source_ip, ptr, sizeof(stream_server_ip));
+			ptr = strtok(NULL, ":");
 			emu_stream_source_port = atoi(ptr);
 			ptr = strtok(NULL, ":");
 			if(ptr) {
@@ -513,6 +516,10 @@ int main(int argc, char**argv)
 			show_usage(argv[0]);
 			exit(0);
 		}
+	}
+	if(!(inet_pton(AF_INET,(const char *)emu_stream_source_ip, &(stream_server_ip.sin_addr)))) {
+		show_usage(argv[0]);
+		exit(0);
 	}
 	if(port == 0 || accountok == 0) {
 		show_usage(argv[0]);

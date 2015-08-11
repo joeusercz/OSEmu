@@ -22,7 +22,7 @@
 
 	extern int32_t emu_stream_source_port;
 	extern int32_t emu_stream_relay_port;
-	
+	extern unsigned char emu_stream_source_ip[16];
 	extern int8_t stream_server_thread_init;
 	
 	void *stream_server(void *a);

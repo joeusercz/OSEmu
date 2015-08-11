@@ -64,14 +64,23 @@ int32_t CharToBin(uint8_t *out, char *in, uint32_t inLen)
 	return 1;
 }
 
-KeyDataContainer CwKeys = { .EmuKeys=NULL, .keyCount=0, .keyMax=0 };
-KeyDataContainer ViKeys = { .EmuKeys=NULL, .keyCount=0, .keyMax=0 };
-KeyDataContainer NagraKeys = { .EmuKeys=NULL, .keyCount=0, .keyMax=0 };
-KeyDataContainer IrdetoKeys = { .EmuKeys=NULL, .keyCount=0, .keyMax=0 };
-KeyDataContainer NDSKeys = { .EmuKeys=NULL, .keyCount=0, .keyMax=0 };
-KeyDataContainer BissKeys = { .EmuKeys=NULL, .keyCount=0, .keyMax=0 };
-KeyDataContainer PowervuKeys = { .EmuKeys=NULL, .keyCount=0, .keyMax=0 };
-KeyDataContainer DreKeys = { .EmuKeys=NULL, .keyCount=0, .keyMax=0 };
+//KeyDataContainer CwKeys = { .EmuKeys=NULL, .keyCount=0, .keyMax=0 };
+//KeyDataContainer ViKeys = { .EmuKeys=NULL, .keyCount=0, .keyMax=0 };
+//KeyDataContainer NagraKeys = { .EmuKeys=NULL, .keyCount=0, .keyMax=0 };
+//KeyDataContainer IrdetoKeys = { .EmuKeys=NULL, .keyCount=0, .keyMax=0 };
+//KeyDataContainer NDSKeys = { .EmuKeys=NULL, .keyCount=0, .keyMax=0 };
+//KeyDataContainer BissKeys = { .EmuKeys=NULL, .keyCount=0, .keyMax=0 };
+//KeyDataContainer PowervuKeys = { .EmuKeys=NULL, .keyCount=0, .keyMax=0 };
+//KeyDataContainer DreKeys = { .EmuKeys=NULL, .keyCount=0, .keyMax=0 };
+
+KeyDataContainer CwKeys = { NULL, 0, 0 };
+KeyDataContainer ViKeys = { NULL, 0, 0 };
+KeyDataContainer NagraKeys = { NULL, 0, 0 };
+KeyDataContainer IrdetoKeys = { NULL, 0, 0 };
+KeyDataContainer NDSKeys = { NULL, 0, 0 };
+KeyDataContainer BissKeys = { NULL, 0, 0 };
+KeyDataContainer PowervuKeys = { NULL, 0, 0 };
+KeyDataContainer DreKeys = { NULL, 0, 0 };
 
 static KeyDataContainer *GetKeyContainer(char identifier)
 {

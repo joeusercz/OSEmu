@@ -13,10 +13,15 @@
 #include "module-emulator-osemu.h"
 #include "module-emulator-stream.h"
 
+#ifndef WITH_EMU
+#include <signal.h>
+#endif
+
 extern int32_t exit_oscam;
 int8_t stream_server_thread_init = 0;
 int32_t emu_stream_source_port = 8001;
 int32_t emu_stream_relay_port = 17999;
+unsigned char emu_stream_source_ip[16] = {"127.0.0.1"};
 
 #ifdef WITH_EMU
 pthread_mutex_t emu_fixed_key_data_mutex;
@@ -25,22 +30,9 @@ uint16_t emu_stream_cur_srvid = 0;
 LLIST *ll_emu_stream_delayed_keys;
 int8_t stream_server_has_ecm = 0;
 #endif
+int our_pid;
 
 static int32_t glistenfd, gconnfd;
-
-static uint32_t CheckTsPackets(uint32_t packetSize, uint8_t *buf, uint32_t bufLength, uint16_t *packetCount)
-{
-	uint32_t i;
-	(*packetCount) = 0;
-	
-	for(i=packetSize; i<bufLength; i+=packetSize) {
-		if(buf[i] == 0x47) {
-			(*packetCount)++;
-		}	
-	}
-	
-	return (*packetCount);
-}
 
 static void SearchTsPackets(uint8_t *buf, uint32_t bufLength, uint16_t *packetCount, uint16_t *packetSize, uint16_t *startOffset)
 {
@@ -52,17 +44,17 @@ static void SearchTsPackets(uint8_t *buf, uint32_t bufLength, uint16_t *packetCo
 
 	for(i=0; i<bufLength; i++) {	
 		if(buf[i] == 0x47) {
-			if(CheckTsPackets(188, buf+i, bufLength-i, packetCount)) {
+			if((buf[i+188] == 0x47) & (buf[i+376] == 0x47)) {  //if three packets align, probably safe to assume correct size.
 				(*packetSize) = 188;
 				(*startOffset) = i;
 				return;
 			}
-			else if(CheckTsPackets(204, buf+i, bufLength-i, packetCount)) {
+			else if((buf[i+204] == 0x47) & (buf[i+408] == 0x47)) {
 				(*packetSize) = 204;
 				(*startOffset) = i;
 				return;
 			}
-			else if(CheckTsPackets(208, buf+i, bufLength-i, packetCount)) {
+			else if((buf[i+208] == 0x47) & (buf[i+416] == 0x47)) {
 				(*packetSize) = 208;
 				(*startOffset) = i;
 				return;
@@ -71,7 +63,6 @@ static void SearchTsPackets(uint8_t *buf, uint32_t bufLength, uint16_t *packetCo
 		
 	}
 	
-	(*packetCount) = 0;
 }
 
 typedef void (*ts_data_callback)(emu_stream_client_data *cdata);
@@ -208,7 +199,7 @@ static void ParsePMTData(emu_stream_client_data *cdata)
 	if(12+program_info_length >= section_length)
 		{ return; }
 	
-	for(i=12; i+1 < 12+program_info_length; i+=descriptor_length)
+	for(i=12; i+1 < 12+program_info_length; i+=descriptor_length+2)
 	{
 		descriptor_tag = data[i];
 		descriptor_length = data[i+1];
@@ -275,28 +266,37 @@ static void ParseECMData(emu_stream_client_data *cdata)
 	}
 }
 
-static void ParseTSPackets(emu_stream_client_data *data, uint8_t *stream_buf, uint16_t packetCount, uint16_t packetSize)
+static void ParseTSPackets(emu_stream_client_data *data, uint8_t *stream_buf,  uint32_t bufLength, uint16_t packetSize)
 {
-	uint32_t i, j;
+	uint32_t i, j, k;
 	uint32_t tsHeader;
 	uint16_t pid, offset;
-	uint8_t scramblingControl, payloadStart;
+	uint8_t scramblingControl, payloadStart, oddeven;
 	int8_t oddKeyUsed;
 	uint32_t *deskey;
 	uint8_t *pdata;
-	uint8_t *packetCluster[3];
-	void *csakey;
+	uint8_t *packetClusterA[4][128];  //separate cluster arrays for video and each audio track
+	uint8_t *packetClusterV[512];
+	void *csakeyA[4];
+	void *csakeyV;
 	emu_stream_client_data *keydata;
+	uint32_t scrambled_packets;
+
+	packetClusterV[0] = NULL;
+	scrambled_packets = 0;  // a counter for how many scrambled video packets (mostly for debugging)
+	uint32_t cs =0;  //video cluster start
+	uint32_t ce =1;  //video cluster end
+	uint32_t csa[4];  //cluster index for audio tracks
 	
-	for(i=0; i<packetCount; i++)
+	for(i=0; i<bufLength; i+=packetSize)  // process all packets in buffer
 	{		
-		tsHeader = b2i(4, stream_buf+(i*packetSize));
+		tsHeader = b2i(4, stream_buf+i);
 		pid = (tsHeader & 0x1fff00) >> 8;
 		scramblingControl = tsHeader & 0xc0;
 		payloadStart = (tsHeader & 0x400000) >> 22;
 
 		if(tsHeader & 0x20)
-			{ offset = 4 + stream_buf[(i*packetSize)+4] + 1; }
+			{ offset = 4 + stream_buf[i+4] + 1; }
 		else
 			{ offset = 4; }
 		
@@ -308,7 +308,7 @@ static void ParseTSPackets(emu_stream_client_data *data, uint8_t *stream_buf, ui
 			if(pid == 0)
 			{ 
 				ParseTSData(0x00, 0xFF, 16, &data->have_pat_data, data->data, sizeof(data->data), &data->data_pos, payloadStart, 
-								stream_buf+(i*packetSize)+offset, packetSize-offset, ParsePATData, data);
+								stream_buf+i+offset, packetSize-offset, ParsePATData, data);
 			}
 		
 			continue;
@@ -325,7 +325,7 @@ static void ParseTSPackets(emu_stream_client_data *data, uint8_t *stream_buf, ui
 			if(pid == data->pmt_pid)
 			{
 				ParseTSData(0x02, 0xFF, 21, &data->have_pmt_data, data->data, sizeof(data->data), &data->data_pos, payloadStart, 
-								stream_buf+(i*packetSize)+offset, packetSize-offset, ParsePMTData, data);
+								stream_buf+i+offset, packetSize-offset, ParsePMTData, data);
 			}
 		
 			continue;
@@ -338,21 +338,22 @@ static void ParseTSPackets(emu_stream_client_data *data, uint8_t *stream_buf, ui
 #endif
 			
 			ParseTSData(0x80, 0xFE, 10, &data->have_ecm_data, data->data, sizeof(data->data), &data->data_pos, payloadStart, 
-							stream_buf+(i*packetSize)+offset, packetSize-offset, ParseECMData, data);
+							stream_buf+i+offset, packetSize-offset, ParseECMData, data);
+//	printf("New ecm packet...\n");
 			continue;
 		}
 		
 		if(scramblingControl == 0)
 			{ continue; }
 		
-		if(!(stream_buf[(i*packetSize)+3] & 0x10))
+		if(!(stream_buf[i+3] & 0x10))
 		{
-			stream_buf[(i*packetSize)+3] &= 0x3F;
+			stream_buf[i+3] &= 0x3F;
 			continue;
 		}
 
 		oddKeyUsed = scramblingControl == 0xC0 ? 1 : 0;
-
+//printf("oddKeyUsed = %i\n",oddKeyUsed);
 #ifdef WITH_EMU	
 		if(!stream_server_has_ecm)
 		{
@@ -369,28 +370,120 @@ static void ParseTSPackets(emu_stream_client_data *data, uint8_t *stream_buf, ui
 		
 		if(keydata->pvu_csa_used)
 		{
-			csakey = NULL;
+//	printf("New CSAA   packet...\n");
+//	printf("scramblingControl=%i\n",scramblingControl);
+			oddeven = scramblingControl;  // for detecting odd/even switch
+			csakeyV = NULL;
+			csakeyA[0] = NULL;
+			csakeyA[1] = NULL;
+			csakeyA[2] = NULL;
+			csakeyA[3] = NULL;
 			
-			if(pid == data->video_pid)
-				{ csakey = keydata->pvu_csa_ks[PVU_CW_VID]; }
+			if(pid == data->video_pid)   // start with video pid, since it is most dominant
+			{
+				csakeyV = keydata->pvu_csa_ks[PVU_CW_VID];
+						
+				if(csakeyV !=NULL) 
+				{
+					for(k=0; k<data->audio_pid_count; k++)
+						{
+							csakeyA[k] = keydata->pvu_csa_ks[PVU_CW_A1+k];
+							csa[k]=0;
+						}
+					scrambled_packets=0;
+					cs=0;
+					ce=1;
+					packetClusterV[cs] = stream_buf+i;  // set first cluster start
+					scrambled_packets++;
+					for(j=i+packetSize;j<bufLength;j+=packetSize)   // Now iterate through the rest of the packets and create clusters for batch decryption
+					{
+						tsHeader = b2i(4, stream_buf+j);
+						pid = (tsHeader & 0x1fff00) >> 8;
+						if(pid == data->video_pid) 
+						{
+							if (oddeven != (tsHeader & 0xc0)) // changed key so stop adding clusters
+							{
+//	printf("New key video...\n");
+//	printf("scramblingControl=%i\n",scramblingControl);
+//	printf("oddeven=%i   header=%i\n",oddeven,(tsHeader & 0xc0));
+								break;
+							}
+							if (cs > ce) {		// First video packet for each cluster
+								packetClusterV[cs] = stream_buf+j;
+								ce = cs +1;
+							}
+
+							scrambled_packets++;
+						}
+						else
+						{
+							if ( cs < ce) {		// First non-video packet - need to set end of video cluster 
+								packetClusterV[ce] = stream_buf+j -1;
+								cs = ce +1;
+							}
+							for(k=0; k<data->audio_pid_count; k++)  // Check for audio tracks and create single packet clusters
+							{
+								if(pid == data->audio_pids[k])
+								{					
+									packetClusterA[k][csa[k]] = stream_buf+j;
+									csa[k]++;
+									packetClusterA[k][csa[k]] = stream_buf+j+packetSize -1;
+									csa[k]++;
+								}			
+							}
+						}
+					}
+//	printf("cs =%i ce=%i\n",cs,ce);
+					if ( cs > ce )  // last packet was not a video packet, so set null for end of all clusteers
+					{packetClusterV[cs] = NULL;}
+					else 
+					{
+						if(scrambled_packets==1) // Just in case only one video packet was found
+						{
+							packetClusterV[ce] = stream_buf+i+packetSize -1;
+						}
+						else  // last packet was a video packet, so set end of cluster to end of last packet
+						{
+							packetClusterV[ce] = stream_buf+j -1;
+						}
+						packetClusterV[ce+1] = NULL;  // add null to end of cluster list
+					}
+//	printf("scrambled_packets=%i\n",scrambled_packets);
+					if(scrambled_packets>1) j = decrypt_packets(csakeyV, packetClusterV);
+//	printf("descrambled_packets=%i\n",j);
+					scrambled_packets = scrambled_packets - j;  // for debugging
+
+					for(k=0; k<data->audio_pid_count; k++)
+					{
+						if(csakeyA[k] != NULL)  // if audio track has key, set null to mark end and decrypt
+						{
+//	printf("csa k=%i csa[k]=%i\n",k,csa[k]);
+							packetClusterA[k][csa[k]] = NULL;
+							decrypt_packets(csakeyA[k], packetClusterA[k]);
+						}
+					}
+				}			
+			}		
+	// Old audio decrypt	 Check here for any audio packets which weren't already decryptted...
 			else
 			{
 				for(j=0; j<data->audio_pid_count; j++)
 					if(pid == data->audio_pids[j])
-						{ csakey = keydata->pvu_csa_ks[PVU_CW_A1+j]; }
-			}
+						{ csakeyA[0] = keydata->pvu_csa_ks[PVU_CW_A1+j]; }
 			
-			if(csakey != NULL)
-			{					
-				packetCluster[0] = stream_buf+(i*packetSize);
-				packetCluster[1] = stream_buf+((i+1)*packetSize);
-				packetCluster[2] = NULL;
-
-				decrypt_packets(csakey, packetCluster);
+				if(csakeyA[0] != NULL)
+				{					
+//	printf("csa single audio\n");
+					packetClusterA[0][0] = stream_buf+i;
+					packetClusterA[0][1] = stream_buf+i+packetSize -1;
+					packetClusterA[0][2] = NULL;
+					decrypt_packets(csakeyA[0], packetClusterA[0]);
+				}			
 			}			
 		}
 		else
 		{
+//	printf("New DES   packet...\n");
 			deskey = NULL;
 			
 			if(pid == data->video_pid)
@@ -406,11 +499,11 @@ static void ParseTSPackets(emu_stream_client_data *data, uint8_t *stream_buf, ui
 			{					
 				for(j=offset; j+7<188; j+=8)
 				{
-					pdata = stream_buf+(i*packetSize)+j;
+					pdata = stream_buf+i+j;
 					des(pdata, deskey, 0);
 				}
 				
-				stream_buf[(i*packetSize)+3] &= 0x3F;
+				stream_buf[i+3] &= 0x3F;
 			}
 		}
 
@@ -421,6 +514,7 @@ static void ParseTSPackets(emu_stream_client_data *data, uint8_t *stream_buf, ui
 		}
 #endif
 	}
+//	printf("scrambled_packets remaining      =%i\n",scrambled_packets);
 }
 
 static int32_t connect_to_stream(char *http_buf, int32_t http_buf_len, char *stream_path)
@@ -433,17 +527,17 @@ static int32_t connect_to_stream(char *http_buf, int32_t http_buf_len, char *str
 	
 	bzero(&cservaddr, sizeof(cservaddr));
 	cservaddr.sin_family = AF_INET;
-	cservaddr.sin_addr.s_addr = inet_addr("127.0.0.1");
+	cservaddr.sin_addr.s_addr = inet_addr((const char *)emu_stream_source_ip);
 	cservaddr.sin_port = htons(emu_stream_source_port);
 	
 	if(connect(streamfd, (struct sockaddr *)&cservaddr, sizeof(cservaddr)) == -1)
 		{ return -1; }
 			
-	snprintf(http_buf, http_buf_len, "GET %s HTTP/1.1\nHost: localhost:%u\n"
+	snprintf(http_buf, http_buf_len, "GET %s HTTP/1.1\nHost: %s:%u\n"
 				"User-Agent: Mozilla/5.0 (Windows NT 6.1; WOW64; rv:38.0) Gecko/20100101 Firefox/38.0\n"
 				"Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\n"
 				"Accept-Language: en-US\n"
-				"Connection: keep-alive\n\n", stream_path, emu_stream_source_port);
+				"Connection: keep-alive\n\n", stream_path,  emu_stream_source_ip, emu_stream_source_port);
 
 	if(send(streamfd, http_buf, strlen(http_buf), 0) == -1)
 		{ return -1; }
@@ -453,9 +547,9 @@ static int32_t connect_to_stream(char *http_buf, int32_t http_buf_len, char *str
 
 static void handle_stream_client(int32_t connfd)
 {
-#define EMU_DVB_MAX_TS_PACKETS 32
-#define EMU_DVB_BUFFER_SIZE 1+188*EMU_DVB_MAX_TS_PACKETS
-#define EMU_DVB_BUFFER_WAIT 1+188*(EMU_DVB_MAX_TS_PACKETS-3)
+#define EMU_DVB_MAX_TS_PACKETS 256
+#define EMU_DVB_BUFFER_SIZE 188*EMU_DVB_MAX_TS_PACKETS  // Set buffer to align to packets (probably should do it dynamically to account for other sizes...
+#define EMU_DVB_BUFFER_WAIT 188*(EMU_DVB_MAX_TS_PACKETS-128) // we want lots of packets for parallel batch decryption advantage
 
 	char *http_buf, stream_path[255], stream_path_copy[255];
 	int32_t streamfd;
@@ -564,26 +658,46 @@ static void handle_stream_client(int32_t connfd)
 
 		streamErrorCount = 0;
 		streamStatus = 0;
+		bytesRead = 0;
 
-		while(!exit_oscam && clientStatus != -1 && streamStatus != -1)
+		while(!exit_oscam && clientStatus != -1 && streamStatus != -1 && streamErrorCount < 3)
 		{
-			streamStatus = recv(streamfd, stream_buf+bytesRead, EMU_DVB_BUFFER_SIZE-bytesRead, 0);
+			streamStatus = recv(streamfd, stream_buf+bytesRead, EMU_DVB_BUFFER_SIZE-bytesRead, MSG_WAITALL);  
+			//WAIT for full buffer - no memcpy needed and no need for looping for multiple recvs.
 			if(streamStatus == -1)
 				{ break; }
 		
+			if(streamStatus == 0)
+			{
+				cs_log("[Emu] warning: no data from stream source");
+				streamErrorCount++;
+				cs_sleepms(100);
+				continue;	
+			}
+
 			bytesRead += streamStatus;
 			
-			if(bytesRead >= EMU_DVB_BUFFER_WAIT)
+			if(bytesRead >= EMU_DVB_BUFFER_WAIT) //still check in case recv was interuppted and returned non-full buffer
 			{	
-				SearchTsPackets(stream_buf, bytesRead, &packetCount, &packetSize, &startOffset);
-				
-				if(packetCount <= 0)
+				startOffset = 0;
+				if( stream_buf[0] != 0x47 || packetSize == 0)  // only search if not starting on ts packet or unknown packet size 
+				{	
+//printf("packetSize=%i  buf=%x\n",packetSize,stream_buf[0]);
+					SearchTsPackets(stream_buf, bytesRead, &packetCount, &packetSize, &startOffset);
+				}
+				if(packetSize == 0)
 				{
 					bytesRead = 0;
 				}
 				else
 				{
-					ParseTSPackets(data, stream_buf+startOffset, packetCount, packetSize);
+					packetCount = ((bytesRead-startOffset) / packetSize); // Simpler method to count packets
+//printf("packetCount=%i\n",packetCount);
+
+//if ( startOffset !=0 ) printf("startOffset=%i\n\n",startOffset);
+//printf("packetCount=%i   bytesRead=%i\n",packetCount, bytesRead);
+
+					ParseTSPackets(data, stream_buf+startOffset, packetCount*packetSize, packetSize);
 					
 					clientStatus = send(connfd, stream_buf+startOffset, packetCount*packetSize, 0);
 						 
@@ -596,11 +710,20 @@ static void handle_stream_client(int32_t connfd)
 						{ memcpy(stream_buf, stream_buf+remainingDataPos, remainingDataLength); }
 					
 					bytesRead = remainingDataLength;
+//printf("RemaingBytes=%i\n",bytesRead);
+					if (clientStatus < packetCount*packetSize) {     //could buffer client data, but probably just dropping is ok
+						printf("clientStatus=%i\n",clientStatus);
+						printf("bytesRead=%i\n",packetCount*packetSize);
+					}
 				}
 			}
 		}
+//printf("streamErrorCount=%i\n",streamErrorCount);
+//printf("streamStatus=%i\n",streamStatus);
+//printf("streamErrorCount=%i\n",streamErrorCount);
 		
 		close(streamfd);
+		streamErrorCount = 0;
 	}
 	
 	close(connfd);
@@ -619,7 +742,7 @@ void *stream_server(void *UNUSED(a))
 	struct sockaddr_in servaddr, cliaddr;
 	socklen_t clilen;
 	int32_t reuse = 1;
-	
+	signal(SIGCHLD, SIG_IGN);	
 	glistenfd = socket(AF_INET, SOCK_STREAM, 0);
 	if(glistenfd == -1)
 	{
@@ -657,9 +780,32 @@ void *stream_server(void *UNUSED(a))
 			cs_log("[Emu] error: accept() failed");
 			break;
 		}
-		
+	
+#ifndef WITH_EMU
+		/* Create child process */
+	      our_pid = fork();
+	      cs_log("[Emu] FORK pid: %i",our_pid);
+		if (our_pid < 0)
+	       	{
+	        perror("ERROR on fork");
+	        exit(1);
+	        }
+     
+	      if (our_pid == 0)
+	        {
+	        /* This is the client process */
+	        close(glistenfd);
+#endif
 		handle_stream_client(gconnfd);
 		cs_log("[Emu] stream client disconnected");
+#ifndef WITH_EMU
+     		exit(0);
+	        }
+	      else
+	         {
+	         close(gconnfd);
+	         }	
+#endif
 	} 
 	
 	close(glistenfd);
