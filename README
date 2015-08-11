@@ -1,3 +1,25 @@
+My attempt at optimizing CSA decrytpion using ffdecsa's ability to decrypt multiple packets at a time.
+
+Also added a feature to allow multiple clients to connect at the same time. 
+
+And added a change in command line option which enables the specifying of the stream server's IP address on the command line (instead of the default 127.0.0.1)
+
+Usage: OSEmu -a <user>:<password> -p <port> [-b -v -e -c <path> -l <logfile> -i -L -r <stream source ip address>:<stream source port>:<osemu stream relay port>]
+-b enables to start as a daemon (background)
+-v enables a more verbose output (debug output)
+-e enables emm au
+-c sets path of SoftCam.Key
+-l sets log file
+-L only allow local connections
+-i show version info and exit
+-r <stream source ip address>:<stream source port>:<relay port> enables stream relay server
+
+Included are some sample Makefiles which allow you to specify which parallel mode ffdecsa uses. When cross compiling, you will need to update the Makefile to reflect the location of your toolchain. To make with an alternate makefile type:
+
+make -f Makefile.x86.opt.sse3.g++
+
+Original README below:
+
 OSEmu
 ======
 
