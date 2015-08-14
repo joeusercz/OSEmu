@@ -525,6 +525,15 @@ static int32_t connect_to_stream(char *http_buf, int32_t http_buf_len, char *str
 	if(streamfd == -1)
 		{ return -1; }
 	
+	struct timeval tv; 
+	tv.tv_sec = 2; 
+	tv.tv_usec = 0; 
+	if (setsockopt(streamfd, SOL_SOCKET, SO_RCVTIMEO, (char *)&tv, sizeof tv)) 
+	{ 
+		perror("setsockopt"); 
+		return -1; 
+	} 
+
 	bzero(&cservaddr, sizeof(cservaddr));
 	cservaddr.sin_family = AF_INET;
 	cservaddr.sin_addr.s_addr = inet_addr((const char *)emu_stream_source_ip);
@@ -559,10 +568,13 @@ static void handle_stream_client(int32_t connfd)
 	uint32_t remainingDataPos, remainingDataLength;
 	int32_t bytesRead = 0;
 	emu_stream_client_data *data;
-	int8_t streamErrorCount = 0;
+	int8_t streamConnectErrorCount = 0;
+	int8_t streamDataErrorCount = 0;
 	int32_t i, srvidtmp;
 	char *saveptr, *token;
-	
+	char http_version[4];
+	int32_t http_status_code = 0;	
+
 	if(!cs_malloc(&http_buf, 1024))
 	{
 		close(connfd);
@@ -645,36 +657,54 @@ static void handle_stream_client(int32_t connfd)
 	snprintf(http_buf, 1024, "HTTP/1.0 200 OK\nConnection: Close\nContent-Type: video/mpeg\nServer: stream_enigma2\n\n");
 	clientStatus = send(connfd, http_buf, strlen(http_buf), 0);
 
-	while(!exit_oscam && clientStatus != -1 && streamErrorCount < 3)
+	while(!exit_oscam && clientStatus != -1 && streamConnectErrorCount < 3  && streamDataErrorCount < 15)
 	{		
 		streamfd = connect_to_stream(http_buf, 1024, stream_path);
 		if(streamfd == -1)
 		{
 			cs_log("[Emu] warning: cannot connect to stream source");
-			streamErrorCount++;
-			cs_sleepms(100);
+			streamConnectErrorCount++;
+			cs_sleepms(500);
 			continue;	
 		}
 
-		streamErrorCount = 0;
 		streamStatus = 0;
 		bytesRead = 0;
 
-		while(!exit_oscam && clientStatus != -1 && streamStatus != -1 && streamErrorCount < 3)
+		while(!exit_oscam && clientStatus != -1 && streamStatus != -1 && streamConnectErrorCount < 3 && streamDataErrorCount < 15)
 		{
 			streamStatus = recv(streamfd, stream_buf+bytesRead, EMU_DVB_BUFFER_SIZE-bytesRead, MSG_WAITALL);  
 			//WAIT for full buffer - no memcpy needed and no need for looping for multiple recvs.
 			if(streamStatus == -1)
 				{ break; }
 		
-			if(streamStatus == 0)
+			if(streamStatus == 0) // receive timed out, no stream data
 			{
 				cs_log("[Emu] warning: no data from stream source");
-				streamErrorCount++;
+				streamDataErrorCount++; // 2 sec timeout * 15 = 30 seconds no data -> close
 				cs_sleepms(100);
 				continue;	
 			}
 
+
+			if(streamStatus < EMU_DVB_BUFFER_SIZE-bytesRead) // probably just received header but no stream
+			{
+				if(!bytesRead && streamStatus > 13 &&
+					sscanf((const char*)stream_buf, "HTTP/%3s %d ", http_version , &http_status_code) == 2 &&
+					http_status_code != 200)
+				{
+					cs_log("[Emu] error: got %d response from stream source", http_status_code);
+					streamConnectErrorCount+=1;  
+					cs_sleepms(100);
+					break;
+				}
+				else
+				{
+					cs_log("[Emu] warning: non-full buffer from stream source");
+				}
+			}
+
+			streamConnectErrorCount = 0;
 			bytesRead += streamStatus;
 			
 			if(bytesRead >= EMU_DVB_BUFFER_WAIT) //still check in case recv was interuppted and returned non-full buffer
@@ -723,7 +753,6 @@ static void handle_stream_client(int32_t connfd)
 //printf("streamErrorCount=%i\n",streamErrorCount);
 		
 		close(streamfd);
-		streamErrorCount = 0;
 	}
 	
 	close(connfd);
@@ -784,7 +813,6 @@ void *stream_server(void *UNUSED(a))
 #ifndef WITH_EMU
 		/* Create child process */
 	      our_pid = fork();
-	      cs_log("[Emu] FORK pid: %i",our_pid);
 		if (our_pid < 0)
 	       	{
 	        perror("ERROR on fork");
@@ -803,6 +831,7 @@ void *stream_server(void *UNUSED(a))
 	        }
 	      else
 	         {
+		 cs_log("[Emu] FORK pid: %i",our_pid);
 	         close(gconnfd);
 	         }	
 #endif
