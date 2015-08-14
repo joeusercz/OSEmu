@@ -504,10 +504,20 @@ int main(int argc, char**argv)
 			char *ptr = strtok(optarg, ":");
 			cs_strncpy((char *)emu_stream_source_ip, ptr, sizeof(stream_server_ip));
 			ptr = strtok(NULL, ":");
+			if(!ptr)
+			{
+				show_usage(argv[0]);
+				exit(1);
+			}
 			emu_stream_source_port = atoi(ptr);
 			ptr = strtok(NULL, ":");
 			if(ptr) {
 				emu_stream_relay_port = atoi(ptr);
+			}
+			if(emu_stream_source_port == 0 || emu_stream_relay_port == 0)
+			{
+				show_usage(argv[0]);
+				exit(1);
 			}
 			start_relay = 1;
 			break;
